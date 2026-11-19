@@ -5,7 +5,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><sitemesh:write property='title'/> - VideoHub & IoTStar</title>
+  <title>${sitemesh_title} - VideoHub</title>
 
   <!-- Bootstrap 5.3.3 CSS -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -14,7 +14,6 @@
   <!-- Custom Project CSS -->
   <link rel="stylesheet" href="${pageContext.request.contextPath}/static/css/style.css">
 
-  <sitemesh:write property='head'/>
   ${sitemesh_head}
 
   <style>
@@ -130,7 +129,6 @@
 
   <!-- Main Content Decorated by SiteMesh 3 -->
   <main class="py-4 flex-grow-1">
-    <sitemesh:write property='body'/>
     ${sitemesh_body}
   </main>
 

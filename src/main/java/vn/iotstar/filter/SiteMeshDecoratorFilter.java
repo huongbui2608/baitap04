@@ -15,7 +15,11 @@ import java.util.regex.Pattern;
  * Filter áp dụng cấu hình SiteMesh Decorator 3 với Template Bootstrap (Yêu cầu 1).
  * Tự động bọc giao diện các trang con vào Decorator Template (/decorators/web.jsp hoặc /decorators/admin.jsp).
  */
-@WebFilter(filterName = "SiteMeshDecoratorFilter", urlPatterns = "/*")
+@WebFilter(
+    filterName = "SiteMeshDecoratorFilter",
+    urlPatterns = {"*.jsp", "/views/*"},
+    dispatcherTypes = {DispatcherType.REQUEST, DispatcherType.FORWARD}
+)
 public class SiteMeshDecoratorFilter implements Filter {
 
     private static final Pattern TITLE_PATTERN = Pattern.compile("<title>(.*?)</title>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
@@ -30,20 +34,26 @@ public class SiteMeshDecoratorFilter implements Filter {
         HttpServletResponse resp = (HttpServletResponse) response;
 
         String path = req.getServletPath();
+        String reqUri = req.getRequestURI();
 
-        // Loại trừ các tài nguyên tĩnh, decorator nội bộ và API file/stream
-        if (isExcluded(path)) {
+        // Không áp dụng decorator cho chính các file decorator hoặc tài nguyên tĩnh
+        if (path.contains("/decorators/") || reqUri.contains("/decorators/") || isExcluded(path)) {
             chain.doFilter(request, response);
             return;
         }
 
         CharResponseWrapper responseWrapper = new CharResponseWrapper(resp);
-        chain.doFilter(request, responseWrapper);
+        try {
+            chain.doFilter(request, responseWrapper);
+        } catch (Throwable t) {
+            t.printStackTrace();
+            throw new ServletException(t);
+        }
 
         String originalHtml = responseWrapper.getCapturedHtml();
 
-        // Chỉ decorate nếu response có nội dung HTML hợp lệ và không phải redirect
-        if (originalHtml != null && !originalHtml.isEmpty() && resp.getStatus() < 300 && isHtmlContent(originalHtml)) {
+        // Chỉ decorate nếu có nội dung HTML hợp lệ
+        if (originalHtml != null && !originalHtml.trim().isEmpty() && isHtmlContent(originalHtml)) {
             String title = extract(TITLE_PATTERN, originalHtml);
             String head = extract(HEAD_PATTERN, originalHtml);
             String body = extract(BODY_PATTERN, originalHtml);
@@ -60,31 +70,53 @@ public class SiteMeshDecoratorFilter implements Filter {
             req.setAttribute("sitemesh_body", body);
 
             // Chọn decorator phù hợp (admin hoặc web)
-            String decoratorPath = path.startsWith("/admin") ? "/decorators/admin.jsp" : "/decorators/web.jsp";
+            String decoratorPath = (path.contains("/admin/") || reqUri.contains("/admin/"))
+                    ? "/decorators/admin.jsp"
+                    : "/decorators/web.jsp";
 
-            // Bắt đầu render decorator template
-            CharResponseWrapper decoratorWrapper = new CharResponseWrapper(resp);
-            req.getRequestDispatcher(decoratorPath).include(req, decoratorWrapper);
+            String decoratedHtml = null;
+            try {
+                CharResponseWrapper decoratorWrapper = new CharResponseWrapper(resp);
+                req.getRequestDispatcher(decoratorPath).include(req, decoratorWrapper);
+                String captured = decoratorWrapper.getCapturedHtml();
+                if (captured != null && !captured.trim().isEmpty()) {
+                    decoratedHtml = captured;
+                }
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
 
-            String decoratedHtml = decoratorWrapper.getCapturedHtml();
+            if (decoratedHtml == null || decoratedHtml.trim().isEmpty()) {
+                writeOutput(resp, originalHtml);
+                return;
+            }
 
-            // Thay thế các thẻ <sitemesh:write property='...'/> nếu còn tồn tại trong JSP
+            // Thay thế thẻ sitemesh nếu còn sót lại
             decoratedHtml = decoratedHtml.replaceAll("<sitemesh:write\\s+property=['\"]title['\"]\\s*/>", Matcher.quoteReplacement(title))
                                          .replaceAll("<sitemesh:write\\s+property=['\"]head['\"]\\s*/>", Matcher.quoteReplacement(head))
                                          .replaceAll("<sitemesh:write\\s+property=['\"]body['\"]\\s*/>", Matcher.quoteReplacement(body));
 
-            byte[] bytes = decoratedHtml.getBytes(StandardCharsets.UTF_8);
-            resp.setContentType("text/html; charset=UTF-8");
-            resp.setContentLength(bytes.length);
-            resp.getOutputStream().write(bytes);
-            resp.getOutputStream().flush();
+            writeOutput(resp, decoratedHtml);
         } else {
             // Viết trực tiếp nội dung gốc nếu không áp dụng decorator
-            if (originalHtml != null) {
-                byte[] bytes = originalHtml.getBytes(StandardCharsets.UTF_8);
-                resp.getOutputStream().write(bytes);
-                resp.getOutputStream().flush();
+            if (originalHtml != null && !originalHtml.isEmpty()) {
+                writeOutput(resp, originalHtml);
             }
+        }
+    }
+
+    private void writeOutput(HttpServletResponse resp, String html) throws IOException {
+        resp.setContentType("text/html; charset=UTF-8");
+        resp.setCharacterEncoding("UTF-8");
+        byte[] bytes = html.getBytes(StandardCharsets.UTF_8);
+        resp.setContentLength(bytes.length);
+        try {
+            PrintWriter writer = resp.getWriter();
+            writer.write(html);
+            writer.flush();
+        } catch (IllegalStateException e) {
+            resp.getOutputStream().write(bytes);
+            resp.getOutputStream().flush();
         }
     }
 
@@ -94,7 +126,6 @@ public class SiteMeshDecoratorFilter implements Filter {
                path.startsWith("/image") ||
                path.startsWith("/file") ||
                path.startsWith("/video-stream") ||
-               path.startsWith("/decorators/") ||
                path.endsWith(".css") ||
                path.endsWith(".js") ||
                path.endsWith(".png") ||
@@ -105,8 +136,9 @@ public class SiteMeshDecoratorFilter implements Filter {
     }
 
     private boolean isHtmlContent(String content) {
+        if (content == null) return false;
         String lower = content.toLowerCase();
-        return lower.contains("<html") || lower.contains("<!doctype html") || lower.contains("<body");
+        return lower.contains("<html") || lower.contains("<!doctype html") || lower.contains("<body") || lower.contains("<div");
     }
 
     private String extract(Pattern pattern, String content) {
@@ -118,13 +150,34 @@ public class SiteMeshDecoratorFilter implements Filter {
     }
 
     private static class CharResponseWrapper extends HttpServletResponseWrapper {
-        private final ByteArrayOutputStream capture;
+        private final ByteArrayOutputStream capture = new ByteArrayOutputStream();
         private ServletOutputStream output;
         private PrintWriter writer;
 
         public CharResponseWrapper(HttpServletResponse response) {
             super(response);
-            this.capture = new ByteArrayOutputStream();
+        }
+
+        @Override
+        public void setContentLength(int len) {}
+
+        @Override
+        public void setContentLengthLong(long len) {}
+
+        @Override
+        public void setHeader(String name, String value) {
+            if ("content-length".equalsIgnoreCase(name)) {
+                return;
+            }
+            super.setHeader(name, value);
+        }
+
+        @Override
+        public void addHeader(String name, String value) {
+            if ("content-length".equalsIgnoreCase(name)) {
+                return;
+            }
+            super.addHeader(name, value);
         }
 
         @Override
@@ -153,9 +206,19 @@ public class SiteMeshDecoratorFilter implements Filter {
                 throw new IllegalStateException("getOutputStream() already called.");
             }
             if (writer == null) {
-                writer = new PrintWriter(new OutputStreamWriter(capture, StandardCharsets.UTF_8));
+                writer = new PrintWriter(new OutputStreamWriter(capture, StandardCharsets.UTF_8), true);
             }
             return writer;
+        }
+
+        @Override
+        public void flushBuffer() throws IOException {
+            if (writer != null) {
+                writer.flush();
+            }
+            if (output != null) {
+                output.flush();
+            }
         }
 
         public String getCapturedHtml() {
